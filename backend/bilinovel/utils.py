@@ -1,5 +1,69 @@
 from backend.rubbish_secret_map import rubbish_secret_map, blank_list
 from bs4 import BeautifulSoup
+import re
+
+# ═══════════════════════════════════════════════════════════════════
+# LCG + Fisher-Yates 反洗牌 — 还原网站对段落的重排
+# ═══════════════════════════════════════════════════════════════════
+# 网站反扒机制：对 TextContent 中第 20 个及以后的非空 <p> 段落，
+# 使用 LCG (a=9302, c=49397, m=233280) 生成随机序列执行 Fisher-Yates 洗牌。
+# 种子 = chapterId × 126 + 232
+
+_LCG_A = 9302
+_LCG_C = 49397
+_LCG_M = 233280
+
+
+def unshuffle_paragraphs(shuffled_list, chapter_id):
+    """
+    逆向 Fisher-Yates 洗牌，还原被网站打乱的段落顺序。
+
+    正向洗牌 (网站):
+      for i from n-1 down to 1:
+          j = random(0, i)
+          swap(arr[i], arr[j])
+
+    逆向恢复：
+      1. 用相同 LCG 序列正向生成所有 j 值
+      2. 从 i=1 到 n-1 依次反向 swap(arr[i], arr[j])
+
+    Args:
+        shuffled_list: 乱序后的列表（任意类型元素）
+        chapter_id:   章节 ID（整数）
+
+    Returns:
+        恢复原始顺序后的新列表
+    """
+    n = len(shuffled_list)
+    if n <= 1:
+        return shuffled_list[:]
+
+    result = list(shuffled_list)
+    seed = (chapter_id * 126 + 232) % _LCG_M
+    state = seed
+
+    # Pass 1: 以正向顺序生成所有的 j 值（与网站洗牌时的顺序一致）
+    j_values = [0] * n
+    for i in range(n - 1, 0, -1):
+        state = (state * _LCG_A + _LCG_C) % _LCG_M
+        j_values[i] = int((state / _LCG_M) * (i + 1))
+
+    # Pass 2: 反向执行 swap 还原（i 从小到大）
+    for i in range(1, n):
+        j = j_values[i]
+        result[i], result[j] = result[j], result[i]
+
+    return result
+
+
+def extract_chapter_id(url):
+    """
+    从章节 URL 中提取 chapter ID。
+
+    例如: https://www.linovelib.com/novel/1234/5678.html → 5678
+    """
+    m = re.search(r'/(\d+)\.html', url)
+    return int(m.group(1)) if m else None
 
 def get_container_html():
     text_html = """<?xml version="1.0" encoding="UTF-8"?>

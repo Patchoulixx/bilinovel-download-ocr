@@ -7,6 +7,7 @@ import time  # 时间相关操作
 import os
 from rich.progress import track as tqdm
 from backend.bilinovel.utils import *
+from backend.bilinovel.utils import unshuffle_paragraphs, extract_chapter_id
 import zipfile
 import re
 # import pickle
@@ -56,7 +57,42 @@ class Editer(object):
         self.max_thread_num = 8
         self.pool = ThreadPoolExecutor(int(num_thread))
         
-    # # 获取html文档内容
+    def _unshuffle_text_div(self, text_div, chapter_id):
+        """
+        还原网站对 TextContent 中段落的 LCG + Fisher-Yates 洗牌。
+
+        网站将前 20 个非空 <p> 段落保持原位，对其余 <p> 段落执行洗牌。
+        此方法逆向该过程，将段落恢复为原始顺序。
+
+        Args:
+            text_div: BeautifulSoup Tag — TextContent 的 <div> 元素
+            chapter_id: 章节 ID
+        """
+        # 获取所有直接子 <p> 元素（与网站 childNodes 语义一致）
+        p_tags = text_div.find_all('p', recursive=False)
+        # 过滤非空段落（匹配网站 innerHTML.replace(/\s+/g, "").length > 0）
+        non_empty_p = [p for p in p_tags if p.decode_contents().strip()]
+
+        if len(non_empty_p) <= 20:
+            return  # 不需要还原
+
+        # 分离：前 20 个固定，后面的为乱序部分
+        shuffled = non_empty_p[20:]
+
+        # 将乱序段落的 HTML 字符串还原为正确顺序
+        shuffled_html = [str(p) for p in shuffled]
+        unshuffled_html = unshuffle_paragraphs(shuffled_html, chapter_id)
+
+        # 解析为新的 BeautifulSoup Tag 对象（独立的 parse tree，避免交叉引用）
+        unshuffled_p = [
+            BeautifulSoup(h, 'html.parser').find('p') for h in unshuffled_html
+        ]
+
+        # 在原 DOM 中替换乱序段落为还原后的段落
+        for old_p, new_p in zip(shuffled, unshuffled_p):
+            old_p.replace_with(new_p)
+
+    # 获取html文档内容
     # def get_html(self, url, is_gbk=False):
     #     while True:
     #         self.tab.get(url)
@@ -200,12 +236,12 @@ class Editer(object):
         else:
             return chap_html_list
 
-    def get_page_text(self, content_html):
+    def get_page_text(self, content_html, chapter_id=None):
         is_tansfer_rubbish_code = 'woff2' in content_html
         # is_tansfer_rubbish_code = ('font-family: "read"' in content_html)
         bf = BeautifulSoup(content_html, 'html.parser')
-        text_with_head = bf.find('div', {'id': 'TextContent'}) 
-        
+        text_with_head = bf.find('div', {'id': 'TextContent'})
+
         self.remove_element(text_with_head, id='show-more-images')
         self.remove_element(text_with_head, class_='google-auto-placed ap_container')
         self.remove_element(text_with_head, class_='dag')
@@ -214,7 +250,7 @@ class Editer(object):
         # 删除匹配到的内容
         pattern = re.compile(r'<!--(.*?)-->', re.DOTALL)
         text_html = pattern.sub('', text_html)
-        
+
         img_urlre_list = re.findall(r"<img .*?>", text_html)
         for img_urlre in img_urlre_list:
             img_url_full = re.search(r'.[a-zA-Z]{3}/(.*?).(jpg|png|jpeg)', img_urlre)
@@ -232,16 +268,19 @@ class Editer(object):
                 symbol_index = text_html.index(img_symbol)
                 if text_html[symbol_index-1] != '\n':
                     text_html = text_html[:symbol_index] + '\n' + text_html[symbol_index:]
-        
+
         text = BeautifulSoup(text_html, 'html.parser').find('div', id='TextContent')
 
         #删除反爬提示元素
         match = re.findall(r'<p(\d+)>', str(text))
         if len(match) > 0:
             warn_element = text.find(f'p{match[0]}')
-            warn_element.decompose()  
+            warn_element.decompose()
 
-       
+        # ── 还原 LCG + Fisher-Yates 段落重排 ──
+        if chapter_id is not None:
+            self._unshuffle_text_div(text, chapter_id)
+
         text = text.decode_contents()
         if text.startswith('\n'):
             text = text[1:]
@@ -266,9 +305,10 @@ class Editer(object):
 
     def get_chap_text(self, url, chap_name, return_next_chapter=False):
         text_chap = ''
-        page_no = 1 
+        page_no = 1
         url_ori = url
         next_chap_url = None
+        chapter_id = extract_chapter_id(url_ori)
         while True:
             if page_no == 1:
                 str_out = chap_name
@@ -276,7 +316,7 @@ class Editer(object):
                 str_out = f'    正在下载第{page_no}页......'
             print(str_out)
             content_html = self.get_html(url, is_gbk=False, is_main_text=True)
-            text = self.get_page_text(content_html)
+            text = self.get_page_text(content_html, chapter_id=chapter_id)
             text_chap += text
             url_new = url_ori.replace('.html', '_{}.html'.format(page_no+1))[len(self.url_head):]
             if url_new in content_html:
